@@ -27,16 +27,20 @@ A root selector at `/` chooses between two versions:
 ## AI assistant (`/v2/ai`)
 
 Ask questions in plain English, e.g. *"What was the weekly close when the high of
-the week was Monday and the monthly close was bearish?"*. The assistant:
+the week was Monday and the monthly close was bearish?"*, including compound
+conditions (*"monday high and friday low"*) and follow-ups that inherit context
+(*"so what would be the weekly close?"*). The assistant:
 
-1. Converts the question to a structured query plan
-   (`{ dataset, targetField, filters: [{ field, op, value }] }`). A deterministic
-   parser handles common phrasing; an optional local Ollama model
-   (`qwen2.5-coder:7b`, used only if `OLLAMA_HOST` is set) can translate harder
-   phrasings to the same JSON.
+1. Converts the question — plus the running conversation — into a structured
+   query plan (`{ dataset, targetField, filters: [{ field, op, value }] }`). A
+   free LLM does this when a key is set (auto-detected: Gemini, Groq,
+   OpenRouter, or local Ollama — see `.env.example`); a deterministic keyword
+   parser is the always-on fallback and handles compound/follow-up phrasing too.
 2. Executes the query against Supabase and **counts the distribution in code** —
-   the model never calculates the final statistics.
-3. Replies like a research assistant and shows the supporting plan, distribution,
+   the model never calculates any statistic, so figures can't be hallucinated. A
+   number guard rejects any narration that introduces a figure we didn't compute.
+3. Replies like a research assistant, compares the result to the whole-dataset
+   baseline for context, and shows the supporting plan, distribution, baseline,
    and sample rows for auditability.
 
 Chat memory is browser-session only (React state); it is never written to the
@@ -75,6 +79,8 @@ Copy `.env.example` to `.env.local` and fill in the values:
 | `SUPABASE_DB_PASSWORD` | Postgres password for the import scripts |
 | `SUPABASE_DB_HOST` / `SUPABASE_DB_PORT` | IPv4 session-pooler host for scripts (the direct DB host is IPv6-only) |
 | `CRON_SECRET` | Protects `/api/cron/daily-update` |
+| `GEMINI_API_KEY` / `GROQ_API_KEY` / `OPENROUTER_API_KEY` | Optional free LLM for NL→plan + narration (one is enough; falls back to the parser) |
+| `LLM_PROVIDER` | Optional: force `gemini` \| `groq` \| `openrouter` \| `ollama` |
 | `OLLAMA_HOST` / `OLLAMA_MODEL` | Optional local LLM for NL→JSON parsing |
 
 The secret key is only read in server code (cron route) and is never shipped to

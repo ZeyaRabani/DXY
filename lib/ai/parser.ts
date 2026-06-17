@@ -42,23 +42,33 @@ function rangeField(dataset: SourceId): string {
   return "d_range";
 }
 
+interface Target {
+  dataset: SourceId;
+  targetField: string;
+  label: string;
+  // True when the question explicitly named the period+close (vs a weak guess).
+  explicit: boolean;
+}
+
 // Detect which dataset/target the question is about.
-function detectTarget(q: string): { dataset: SourceId; targetField: string; label: string } {
+function detectTarget(q: string): Target {
   // Ordered, most-specific first.
   if (/\bweek(ly)?\s+(close|candle|bias)\b/.test(q) || /\bclose\s+of\s+the\s+week\b/.test(q)) {
-    return { dataset: "weekly", targetField: "w_close", label: "weekly close" };
+    return { dataset: "weekly", targetField: "w_close", label: "weekly close", explicit: true };
   }
   if (/\bmonth(ly)?\s+(close|candle|bias)\b/.test(q) || /\bclose\s+of\s+the\s+month\b/.test(q)) {
-    return { dataset: "monthly", targetField: "m_close", label: "monthly close" };
+    return { dataset: "monthly", targetField: "m_close", label: "monthly close", explicit: true };
   }
   if (/\b(day|daily)\s+(close|candle|bias)\b/.test(q) || /\bclose\s+of\s+the\s+day\b/.test(q)) {
-    return { dataset: "daily", targetField: "d_close", label: "daily close" };
+    return { dataset: "daily", targetField: "d_close", label: "daily close", explicit: true };
   }
   // Weaker keyword-only signals.
-  if (/\bweek(ly)?\b/.test(q)) return { dataset: "weekly", targetField: "w_close", label: "weekly close" };
-  if (/\bmonth(ly)?\b/.test(q)) return { dataset: "monthly", targetField: "m_close", label: "monthly close" };
-  return { dataset: "daily", targetField: "d_close", label: "daily close" };
+  if (/\bweek(ly)?\b/.test(q)) return { dataset: "weekly", targetField: "w_close", label: "weekly close", explicit: false };
+  if (/\bmonth(ly)?\b/.test(q)) return { dataset: "monthly", targetField: "m_close", label: "monthly close", explicit: false };
+  return { dataset: "daily", targetField: "d_close", label: "daily close", explicit: false };
 }
+
+const REFINEMENT_CUE = /^\s*(so|and|then|what about|how about|now|ok|okay|also|but|what if)\b/i;
 
 interface MatchSpec {
   re: RegExp;
@@ -95,6 +105,32 @@ const SPECS: MatchSpec[] = [
   {
     field: "wl",
     re: new RegExp(`(?:low of the week|weekly low|week'?s? low|week low|wl)\\s*(?:was|is|on|=|:|in|fell on|made on)?\\s*(?:a |an |the )?(${DAY_ALT})`, "i"),
+    build: weekdayFilter("wl"),
+    describe: (m) => `weekly low on ${WEEKDAY[m[1].toLowerCase()]}`,
+  },
+  // Day-adjacent weekly high/low phrasing: "Monday high", "high on Monday",
+  // "Friday low", "low was Friday" (no explicit "week" qualifier needed).
+  {
+    field: "wh",
+    re: new RegExp(`(${DAY_ALT})\\s+(?:was\\s+(?:the\\s+)?)?(?:weekly\\s+|week'?s?\\s+)?high\\b`, "i"),
+    build: weekdayFilter("wh"),
+    describe: (m) => `weekly high on ${WEEKDAY[m[1].toLowerCase()]}`,
+  },
+  {
+    field: "wh",
+    re: new RegExp(`\\bhigh\\s+(?:of the week\\s+)?(?:was|made|set|on|in|=|:)\\s*(?:made\\s+)?(?:a |an |the )?(${DAY_ALT})`, "i"),
+    build: weekdayFilter("wh"),
+    describe: (m) => `weekly high on ${WEEKDAY[m[1].toLowerCase()]}`,
+  },
+  {
+    field: "wl",
+    re: new RegExp(`(${DAY_ALT})\\s+(?:was\\s+(?:the\\s+)?)?(?:weekly\\s+|week'?s?\\s+)?low\\b`, "i"),
+    build: weekdayFilter("wl"),
+    describe: (m) => `weekly low on ${WEEKDAY[m[1].toLowerCase()]}`,
+  },
+  {
+    field: "wl",
+    re: new RegExp(`\\blow\\s+(?:of the week\\s+)?(?:was|made|set|on|in|=|:)\\s*(?:made\\s+)?(?:a |an |the )?(${DAY_ALT})`, "i"),
     build: weekdayFilter("wl"),
     describe: (m) => `weekly low on ${WEEKDAY[m[1].toLowerCase()]}`,
   },
@@ -199,8 +235,9 @@ function consume(s: string, re: RegExp): { match: RegExpExecArray | null; rest: 
   return { match: m, rest };
 }
 
-// Deterministic natural-language -> query plan parser.
-export function parseQuestion(question: string): ParseResult {
+// Deterministic natural-language -> query plan parser. An optional previous plan
+// lets follow-up questions inherit still-relevant filters from the prior turn.
+export function parseQuestion(question: string, prevPlan?: QueryPlan | null): ParseResult {
   const original = question.trim();
   let q = ` ${original.toLowerCase().replace(/[?!.]/g, " ").replace(/\s+/g, " ")} `;
   const target = detectTarget(q);
@@ -217,6 +254,14 @@ export function parseQuestion(question: string): ParseResult {
         q = rest;
       }
     }
+  }
+
+  // wh/wl are weekly concepts. If the user asked about a weekly-high/low day but
+  // we only weakly guessed "daily", promote the question to the weekly dataset.
+  if (!target.explicit && target.dataset === "daily" && filters.some((f) => f.field === "wh" || f.field === "wl")) {
+    target.dataset = "weekly";
+    target.targetField = "w_close";
+    target.label = "weekly close";
   }
 
   // A bare weekday left in the text (e.g. "on Mondays") becomes a daily weekday
@@ -237,6 +282,20 @@ export function parseQuestion(question: string): ParseResult {
       const name = mm[1][0].toUpperCase() + mm[1].slice(1).toLowerCase();
       filters.push({ field: "month", op: "eq", value: name });
       matched.push(`month ${name}`);
+    }
+  }
+
+  // Follow-up inheritance: when this looks like a refinement of the prior turn
+  // (a cue word, or no new filters of its own), carry over the previous filters
+  // that still apply to the chosen dataset and were not re-specified here.
+  const isRefinement = REFINEMENT_CUE.test(original) || filters.length === 0;
+  if (prevPlan && isRefinement) {
+    for (const pf of prevPlan.filters) {
+      if (filters.some((f) => f.field === pf.field)) continue;
+      if (!getField(target.dataset, pf.field)) continue;
+      filters.push(pf);
+      const label = getField(target.dataset, pf.field)?.label ?? pf.field;
+      matched.push(`${label} ${Array.isArray(pf.value) ? pf.value.join("\u2013") : String(pf.value)} (from earlier)`);
     }
   }
 

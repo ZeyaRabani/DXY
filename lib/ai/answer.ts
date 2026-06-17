@@ -12,6 +12,15 @@ function unit(dataset: SourceId, plural = true): string {
   return plural ? p : s;
 }
 
+export function unitLabel(dataset: SourceId): string {
+  return unit(dataset, true);
+}
+
+export interface Baseline {
+  total: number;
+  distribution: DistributionRow[];
+}
+
 function targetLabel(dataset: SourceId, field: string): string {
   return getField(dataset, field)?.label.toLowerCase() ?? field;
 }
@@ -35,6 +44,7 @@ export function buildAnswer(
   plan: QueryPlan,
   total: number,
   distribution: DistributionRow[],
+  baseline?: Baseline,
 ): string {
   const u = unit(plan.dataset);
   const us = unit(plan.dataset, false);
@@ -67,9 +77,20 @@ export function buildAnswer(
       parts.push(`The stronger side was ${side}: ${strong} vs ${weak}, or ${sharePct.toFixed(2)}% ${side}.`);
       if (bias) {
         parts.push(`${lead}, this condition points to a ${side} ${label} bias.`);
-        parts.push(`I would treat it as a bias filter, not a full trade signal by itself.`);
       } else {
         parts.push(`${lead}, so I would not lean hard on this condition by itself.`);
+      }
+    }
+    if (baseline && baseline.total > 0 && plan.filters.length > 0) {
+      const baseStrong = baseline.distribution.find((d) => d.value === side)?.count ?? 0;
+      const basePct = pct(baseStrong, baseline.total);
+      const edge = Math.round((sharePct - basePct) * 100) / 100;
+      if (Math.abs(edge) >= 3) {
+        parts.push(
+          `For context, ${side} ${label} happens ${basePct.toFixed(2)}% of the time overall, so this lifts the odds by about ${Math.abs(edge).toFixed(1)} points.`,
+        );
+      } else {
+        parts.push(`That is roughly in line with the ${basePct.toFixed(2)}% ${side} baseline, so the condition adds little on its own.`);
       }
     }
     return parts.join(" ");
