@@ -8,14 +8,21 @@ interface PlanFilter {
   op: string;
   value: string | number | boolean | Array<string | number>;
 }
+interface QueryPlanShape {
+  dataset: string;
+  targetField?: string;
+  filters: PlanFilter[];
+}
 interface AssistantResult {
   question: string;
-  plan: { dataset: string; targetField?: string; filters: PlanFilter[] };
+  plan: QueryPlanShape;
   interpretation: string;
   matched: string[];
   answer: string;
   total: number;
   distribution: Array<{ value: string; count: number; pct: number }>;
+  baseline?: Array<{ value: string; count: number; pct: number }>;
+  baselineTotal?: number;
   sampleRows: Array<Record<string, unknown>>;
   source: "parser" | "llm";
   error?: string;
@@ -47,6 +54,11 @@ export default function AiChat() {
   async function ask(question: string) {
     const q = question.trim();
     if (!q || loading) return;
+    // Send the resolved plans of prior turns so follow-ups keep context.
+    const history = messages
+      .filter((m) => m.role === "assistant" && m.result)
+      .slice(-6)
+      .map((m) => ({ question: m.result!.question, plan: m.result!.plan }));
     setMessages((m) => [...m, { role: "user", text: q }]);
     setInput("");
     setLoading(true);
@@ -54,7 +66,7 @@ export default function AiChat() {
       const res = await fetch("/api/ai", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ question: q }),
+        body: JSON.stringify({ question: q, history }),
       });
       const json = (await res.json()) as AssistantResult;
       if (!res.ok) {
@@ -177,6 +189,21 @@ function Audit({ result }: { result: AssistantResult }) {
             <p className="mt-1 text-muted">Understood as: {matched.join(", ")}.</p>
           )}
         </div>
+
+        {result.baseline && result.baseline.length > 0 && result.plan.filters.length > 0 && (
+          <div>
+            <div className="mb-1 font-medium text-muted">
+              Baseline · all {result.plan.dataset} ({result.baselineTotal})
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {result.baseline.map((d) => (
+                <Chip key={d.value}>
+                  {d.value}: {d.pct.toFixed(2)}%
+                </Chip>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div>
           <div className="mb-1 font-medium text-muted">Distribution ({total} rows)</div>
