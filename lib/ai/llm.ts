@@ -64,8 +64,25 @@ async function withTimeout<T>(fn: (signal: AbortSignal) => Promise<T>): Promise<
   }
 }
 
-// Single entry point: send a system prompt + conversation, get raw text back.
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Single entry point with one retry, so a transient failure or a brief
+// rate-limit (Groq free tier) doesn't silently drop us to the fallback answer.
 async function callModel(
+  cfg: ProviderConfig,
+  system: string,
+  turns: ChatTurn[],
+  json: boolean,
+): Promise<string | null> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const out = await callModelOnce(cfg, system, turns, json);
+    if (out && out.trim()) return out;
+    if (attempt === 0) await sleep(1200);
+  }
+  return null;
+}
+
+async function callModelOnce(
   cfg: ProviderConfig,
   system: string,
   turns: ChatTurn[],
